@@ -41,6 +41,7 @@ from vint_train.training.train_eval_loop import (
 
 
 def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파이프라인을 구성
+    ## 1. 환경 설정 및 초기화
     # 설정 파일에서 주어진 거리 및 액션의 범위 조건이 올바른지 확인
     assert config["distance"]["min_dist_cat"] < config["distance"]["max_dist_cat"]
     assert config["action"]["min_dist_cat"] < config["action"]["max_dist_cat"]
@@ -65,15 +66,16 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
         f"cuda:{first_gpu_id}" if torch.cuda.is_available() else "cpu"
     )
 
-    # 랜덤 시드를 설정하여 결과 재현성을 확보
+    # 랜덤 시드를 고정하여 여러 번 실행해도 동일한 초기 조건과 난수 생성 순서를 사용
     if "seed" in config:
         np.random.seed(config["seed"])
         torch.manual_seed(config["seed"])
         cudnn.deterministic = True
 
-    # cudnn의 벤치마크를 활성화 (입력 사이즈가 일정할 때 유리)
+    # cudnn의 벤치마크를 활성화 (GPU 연산 속도를 최적화, 입력 사이즈가 일정할 때 유리)
     cudnn.benchmark = True
 
+    ## 2. 데이터 로딩 및 전처리
     # 이미지 전처리: 평균 및 표준편차로 정규화 수행
     transform = ([
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -86,9 +88,9 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
 
     # context_type과 clip_goals의 기본값 설정
     if "context_type" not in config:
-        config["context_type"] = "temporal"
+        config["context_type"] = "temporal"    # 입력 데이터의 맥락을 추출하는 방식 설정, 기본으로 시간 순서에 따른 데이터를 우선적으로 처리
     if "clip_goals" not in config:
-        config["clip_goals"] = False
+        config["clip_goals"] = False    # clip은 원래 데이터에 매우 큰 값이나 이상치가 포함되어 있을 때, 이러한 값들을 일정한 범위 내로 제한하여 학습의 안정성을 높임
 
     # 설정 파일에 정의된 각 데이터셋에 대해 처리
     for dataset_name in config["datasets"]:
@@ -160,8 +162,8 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
             num_workers=0,
             drop_last=False,
         )
-
-    # 모델 생성: 설정에 따라 모델 타입을 선택하여 인스턴스화
+    ## 3. 모델 생성
+    # 설정에 따라 모델 타입을 선택하여 인스턴스화
     if config["model_type"] == "gnm":
         model = GNM(
             config["context_size"],
@@ -211,7 +213,7 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
                 mha_num_attention_heads=config["mha_num_attention_heads"],
                 mha_num_attention_layers=config["mha_num_attention_layers"],
             )
-            vision_encoder = replace_bn_with_gn(vision_encoder)    # BatchNorm을 GroupNorm으로 대체
+            vision_encoder = replace_bn_with_gn(vision_encoder)    # BatchNorm을 GroupNorm으로 대체 (안정적인 정규화를 위해)
         else: 
             raise ValueError(f"Vision encoder {config['vision_encoder']} not supported")
 
@@ -241,7 +243,8 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
     else:
         raise ValueError(f"Model {config['model']} not supported")
 
-    # 그라디언트 클리핑 설정 (설정에 따라 최대 norm으로 클리핑)
+    ## 4. 학습 준비
+    # 그라디언트 클리핑 설정 (그라디언트를 미리 정한 최대값으로 제한)
     if config["clipping"]:
         print("Clipping gradients to", config["max_norm"])
         for p in model.parameters():
@@ -294,7 +297,7 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
         else:
             raise ValueError(f"Scheduler {config['scheduler']} not supported")
 
-        # warmup 사용 시 warmup scheduler로 래핑
+        # warmup 사용 시 warmup scheduler로 래핑, 초기 학습률을 점진적으로 증가시키는 방법
         if config["warmup"]:
             print("Using warmup scheduler")
             scheduler = GradualWarmupScheduler(
@@ -304,6 +307,7 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
                 after_scheduler=scheduler,
             )
 
+    ## 5. 체크포인트 로드 및 멀티 GPU 설정
     # 만약 이전 체크포인트에서 학습을 이어서 한다면 현재 에포크를 불러옴
     current_epoch = 0
     if "load_run" in config:
@@ -327,6 +331,7 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
         if scheduler is not None and "scheduler" in latest_checkpoint:
             scheduler.load_state_dict(latest_checkpoint["scheduler"].state_dict())
 
+    ## 6. 학습 및 평가 루프 실행
     # 모델 타입에 따라 다른 학습/평가 루프를 실행
     if config["model_type"] == "vint" or config["model_type"] == "gnm": 
         train_eval_loop(
@@ -377,7 +382,7 @@ def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파�
 
     print("FINISHED TRAINING")
 
-
+## 7. 로깅 및 프로젝트 관리
 if __name__ == "__main__":
     # 멀티프로세싱 시작 방식을 spawn으로 설정 (주로 Windows나 특정 환경에서 필요)
     torch.multiprocessing.set_start_method("spawn")
@@ -416,7 +421,7 @@ if __name__ == "__main__":
         ],  # should error if dir already exists to avoid overwriting and old project
     )
 
-    # wandb 사용 시 로그인 및 설정 업데이트
+    # wandb 사용 시 학습 진행 상황 실시간 기록 가능
     if config["use_wandb"]:
         wandb.login()
         wandb.init(
