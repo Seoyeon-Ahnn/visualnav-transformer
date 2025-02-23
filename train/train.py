@@ -22,7 +22,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.optimization import get_scheduler
 
 """
-IMPORT YOUR MODEL HERE
+IMPORT YOUR MODEL HERE (아래 모델들과 다른 모델이라면면)
 """
 from vint_train.models.gnm.gnm import GNM
 from vint_train.models.vint.vint import ViNT
