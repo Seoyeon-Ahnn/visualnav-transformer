@@ -36,10 +36,12 @@ from vint_train.training.train_eval_loop import (
 )
 
 
-def main(config):
+def main(config):    ## 설정 파일(config)을 바탕으로 전체 학습 파이프라인을 구성
+    # 설정 파일에서 주어진 거리 및 액션의 범위 조건이 올바른지 확인
     assert config["distance"]["min_dist_cat"] < config["distance"]["max_dist_cat"]
     assert config["action"]["min_dist_cat"] < config["action"]["max_dist_cat"]
 
+    # CUDA 사용 가능 여부 확인 및 GPU 설정
     if torch.cuda.is_available():
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         if "gpu_ids" not in config:
@@ -53,32 +55,38 @@ def main(config):
     else:
         print("Using cpu")
 
+    # 첫 번째 GPU를 기준으로 디바이스 지정
     first_gpu_id = config["gpu_ids"][0]
     device = torch.device(
         f"cuda:{first_gpu_id}" if torch.cuda.is_available() else "cpu"
     )
 
+    # 랜덤 시드를 설정하여 결과 재현성을 확보
     if "seed" in config:
         np.random.seed(config["seed"])
         torch.manual_seed(config["seed"])
         cudnn.deterministic = True
 
-    cudnn.benchmark = True  # good if input sizes don't vary
+    # cudnn의 벤치마크를 활성화 (입력 사이즈가 일정할 때 유리)
+    cudnn.benchmark = True
+
+    # 이미지 전처리: 평균 및 표준편차로 정규화 수행
     transform = ([
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     transform = transforms.Compose(transform)
 
-    # Load the data
+    # 데이터셋과 데이터로더 초기화
     train_dataset = []
     test_dataloaders = {}
 
+    # context_type과 clip_goals의 기본값 설정
     if "context_type" not in config:
         config["context_type"] = "temporal"
-
     if "clip_goals" not in config:
         config["clip_goals"] = False
 
+    # 설정 파일에 정의된 각 데이터셋에 대해 처리
     for dataset_name in config["datasets"]:
         data_config = config["datasets"][dataset_name]
         if "negative_mining" not in data_config:
@@ -90,6 +98,7 @@ def main(config):
         if "waypoint_spacing" not in data_config:
             data_config["waypoint_spacing"] = 1
 
+        # train와 test 데이터를 분리하여 로드
         for data_split_type in ["train", "test"]:
             if data_split_type in data_config:
                     dataset = ViNT_Dataset(
@@ -112,6 +121,7 @@ def main(config):
                         normalize=config["normalize"],
                         goal_type=config["goal_type"],
                     )
+                    # 학습 데이터셋은 리스트에 추가
                     if data_split_type == "train":
                         train_dataset.append(dataset)
                     else:
@@ -120,9 +130,10 @@ def main(config):
                             test_dataloaders[dataset_type] = {}
                         test_dataloaders[dataset_type] = dataset
 
-    # combine all the datasets from different robots
+    # 여러 데이터셋을 합쳐서 하나의 학습 데이터셋으로 만듦
     train_dataset = ConcatDataset(train_dataset)
 
+    # 학습 데이터로더 생성
     train_loader = DataLoader(
         train_dataset,
         batch_size=config["batch_size"],
@@ -132,9 +143,11 @@ def main(config):
         persistent_workers=True,
     )
 
+    # 평가 데이터의 배치 크기 설정 (기본값은 학습 배치 크기와 동일)
     if "eval_batch_size" not in config:
         config["eval_batch_size"] = config["batch_size"]
 
+    # 각 평가 데이터셋에 대해 데이터로더 생성
     for dataset_type, dataset in test_dataloaders.items():
         test_dataloaders[dataset_type] = DataLoader(
             dataset,
@@ -144,7 +157,7 @@ def main(config):
             drop_last=False,
         )
 
-    # Create the model
+    # 모델 생성: 설정에 따라 모델 타입을 선택하여 인스턴스화
     if config["model_type"] == "gnm":
         model = GNM(
             config["context_size"],
@@ -166,6 +179,7 @@ def main(config):
             mha_ff_dim_factor=config["mha_ff_dim_factor"],
         )
     elif config["model_type"] == "nomad":
+        # NoMaD 모델의 경우, 비전 인코더를 추가적으로 선택
         if config["vision_encoder"] == "nomad_vint":
             vision_encoder = NoMaD_ViNT(
                 obs_encoding_size=config["encoding_size"],
@@ -193,10 +207,11 @@ def main(config):
                 mha_num_attention_heads=config["mha_num_attention_heads"],
                 mha_num_attention_layers=config["mha_num_attention_layers"],
             )
-            vision_encoder = replace_bn_with_gn(vision_encoder)
+            vision_encoder = replace_bn_with_gn(vision_encoder)    # BatchNorm을 GroupNorm으로 대체
         else: 
             raise ValueError(f"Vision encoder {config['vision_encoder']} not supported")
-            
+
+        # 노이즈 예측 네트워크와 거리 예측 네트워크를 구성
         noise_pred_net = ConditionalUnet1D(
                 input_dim=2,
                 global_cond_dim=config["encoding_size"],
@@ -204,13 +219,15 @@ def main(config):
                 cond_predict_scale=config["cond_predict_scale"],
             )
         dist_pred_network = DenseNetwork(embedding_dim=config["encoding_size"])
-        
+
+        # 최종적으로 NoMaD 모델을 생성
         model = NoMaD(
             vision_encoder=vision_encoder,
             noise_pred_net=noise_pred_net,
             dist_pred_net=dist_pred_network,
         )
 
+        # diffusion 관련 노이즈 스케줄러 설정
         noise_scheduler = DDPMScheduler(
             num_train_timesteps=config["num_diffusion_iters"],
             beta_schedule='squaredcos_cap_v2',
@@ -220,6 +237,7 @@ def main(config):
     else:
         raise ValueError(f"Model {config['model']} not supported")
 
+    # 그라디언트 클리핑 설정 (설정에 따라 최대 norm으로 클리핑)
     if config["clipping"]:
         print("Clipping gradients to", config["max_norm"])
         for p in model.parameters():
@@ -231,6 +249,7 @@ def main(config):
                 )
             )
 
+    # 학습률(lr) 설정 및 옵티마이저 선택
     lr = float(config["lr"])
     config["optimizer"] = config["optimizer"].lower()
     if config["optimizer"] == "adam":
@@ -242,6 +261,7 @@ def main(config):
     else:
         raise ValueError(f"Optimizer {config['optimizer']} not supported")
 
+    # 학습률 스케줄러 초기화 (옵션에 따라 다양한 스케줄러 사용)
     scheduler = None
     if config["scheduler"] is not None:
         config["scheduler"] = config["scheduler"].lower()
@@ -270,6 +290,7 @@ def main(config):
         else:
             raise ValueError(f"Scheduler {config['scheduler']} not supported")
 
+        # warmup 사용 시 warmup scheduler로 래핑
         if config["warmup"]:
             print("Using warmup scheduler")
             scheduler = GradualWarmupScheduler(
@@ -279,27 +300,30 @@ def main(config):
                 after_scheduler=scheduler,
             )
 
+    # 만약 이전 체크포인트에서 학습을 이어서 한다면 현재 에포크를 불러옴
     current_epoch = 0
     if "load_run" in config:
         load_project_folder = os.path.join("logs", config["load_run"])
         print("Loading model from ", load_project_folder)
         latest_path = os.path.join(load_project_folder, "latest.pth")
-        latest_checkpoint = torch.load(latest_path) #f"cuda:{}" if torch.cuda.is_available() else "cpu")
+        latest_checkpoint = torch.load(latest_path) #f"cuda:{}" if torch.cuda.is_available() else "cpu")    # 체크포인트 불러오기
         load_model(model, config["model_type"], latest_checkpoint)
         if "epoch" in latest_checkpoint:
             current_epoch = latest_checkpoint["epoch"] + 1
 
-    # Multi-GPU
+    # 멀티 GPU 사용 시 DataParallel 적용
     if len(config["gpu_ids"]) > 1:
         model = nn.DataParallel(model, device_ids=config["gpu_ids"])
     model = model.to(device)
 
-    if "load_run" in config:  # load optimizer and scheduler after data parallel
+    # 만약 체크포인트를 불러왔으면 옵티마이저와 스케줄러 상태도 복원
+    if "load_run" in config:  # data parallel 이후에 로드
         if "optimizer" in latest_checkpoint:
             optimizer.load_state_dict(latest_checkpoint["optimizer"].state_dict())
         if scheduler is not None and "scheduler" in latest_checkpoint:
             scheduler.load_state_dict(latest_checkpoint["scheduler"].state_dict())
 
+    # 모델 타입에 따라 다른 학습/평가 루프를 실행
     if config["model_type"] == "vint" or config["model_type"] == "gnm": 
         train_eval_loop(
             train_model=config["train"],
@@ -351,11 +375,13 @@ def main(config):
 
 
 if __name__ == "__main__":
+    # 멀티프로세싱 시작 방식을 spawn으로 설정 (주로 Windows나 특정 환경에서 필요)
     torch.multiprocessing.set_start_method("spawn")
 
+    # 명령행 인자 파서를 사용하여 config 파일 경로를 인자로 받음
     parser = argparse.ArgumentParser(description="Visual Navigation Transformer")
 
-    # project setup
+    # 프로젝트 셋업
     parser.add_argument(
         "--config",
         "-c",
@@ -365,16 +391,17 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # 기본 설정 파일(defaults.yaml) 로드
     with open("config/defaults.yaml", "r") as f:
         default_config = yaml.safe_load(f)
-
     config = default_config
 
+    # 사용자 지정 설정 파일 로드 후 업데이트
     with open(args.config, "r") as f:
         user_config = yaml.safe_load(f)
-
     config.update(user_config)
 
+    # 실행 시간을 기반으로 고유한 run_name 생성 및 프로젝트 폴더 생성
     config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
     config["project_folder"] = os.path.join(
         "logs", config["project_name"], config["run_name"]
@@ -385,6 +412,7 @@ if __name__ == "__main__":
         ],  # should error if dir already exists to avoid overwriting and old project
     )
 
+    # wandb 사용 시 로그인 및 설정 업데이트
     if config["use_wandb"]:
         wandb.login()
         wandb.init(
@@ -392,9 +420,9 @@ if __name__ == "__main__":
             settings=wandb.Settings(start_method="fork"),
             entity="gnmv2", # TODO: change this to your wandb entity
         )
-        wandb.save(args.config, policy="now")  # save the config file
+        wandb.save(args.config, policy="now")  # config 파일 저장
         wandb.run.name = config["run_name"]
-        # update the wandb args with the training configurations
+        # wandb 설정 업데이트 with the training configurations
         if wandb.run:
             wandb.config.update(config)
 
