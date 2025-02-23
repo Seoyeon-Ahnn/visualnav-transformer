@@ -1,3 +1,7 @@
+"""
+training script to train or fine-tune the ViNT model on your custom data
+"""
+
 import os
 import wandb
 import argparse
@@ -36,7 +40,7 @@ from vint_train.training.train_eval_loop import (
 )
 
 
-def main(config):    ## 설정 파일(config)을 바탕으로 전체 학습 파이프라인을 구성
+def main(config):    # 설정 파일(config)을 바탕으로 전체 학습 파이프라인을 구성
     # 설정 파일에서 주어진 거리 및 액션의 범위 조건이 올바른지 확인
     assert config["distance"]["min_dist_cat"] < config["distance"]["max_dist_cat"]
     assert config["action"]["min_dist_cat"] < config["action"]["max_dist_cat"]
