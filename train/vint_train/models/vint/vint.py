@@ -70,6 +70,7 @@ class ViNT(BaseModel):
             nn.Linear(32, self.len_trajectory_pred * self.num_action_params),  # 각 waypoint 위치+각도 예측
         )
 
+    ## 1. 입력 준비: 과거(5장)+현재(1장)+목표(1장) 이미지 입력
     def forward(
         self, obs_img: torch.tensor, goal_img: torch.tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -77,15 +78,16 @@ class ViNT(BaseModel):
         실제 이미지와 목표를 입력받아 미래 경로와 거리 예측하는 함수
         """
 
+        ## 2. 목표 이미지 특징 추출
         # 목표 이미지 인코딩 (late_fusion일 때 별도 처리)
         if self.late_fusion:
             goal_encoding = self.goal_encoder.extract_features(goal_img)
         else:
-            # 현재 이미지와 목표 이미지 합쳐서 6채널로 만든 후 인코딩
+            # 현재 이미지(가장 최근 이미지)와 목표 이미지 합쳐서 6채널로 만든 후 인코딩
             obsgoal_img = torch.cat([obs_img[:, 3*self.context_size:, :, :], goal_img], dim=1)
             goal_encoding = self.goal_encoder.extract_features(obsgoal_img)
 
-        # EfficientNet 최종 특징 처리 (평균 풀링 → Flatten → 드롭아웃)
+        # EfficientNet 최종 특징 처리 (평균 풀링 → Flatten → 드롭아웃, 이미지만 보고 미래를 예측할 수 있도록)
         goal_encoding = self.goal_encoder._avg_pooling(goal_encoding)
         if self.goal_encoder._global_params.include_top:
             goal_encoding = goal_encoding.flatten(start_dim=1)
@@ -98,7 +100,8 @@ class ViNT(BaseModel):
         if len(goal_encoding.shape) == 2:
             goal_encoding = goal_encoding.unsqueeze(1)
 
-        # 관찰 이미지를 context_size만큼 분할 (과거 프레임 나누기)
+        ## 3. 과거(5장)+현재(1장) 이미지 특징 추출: 각각 쪼개서 EfficientNet으로 인코딩, 하나의 시퀀스로 모음
+        # 관찰 이미지를 context_size만큼 분할 (과거 프레임 나누기, 이미지 하나하나 쪼개기)
         obs_img = torch.split(obs_img, 3, dim=1)
 
         # (batch_size, 3, H, W) 형태로 펼치기
@@ -115,6 +118,7 @@ class ViNT(BaseModel):
         # 관찰 이미지 인코딩 크기 조절
         obs_encoding = self.compress_obs_enc(obs_encoding)
 
+        ## 4. 시퀀스 구성: 과거+현재+목표 합치기, Transformer가 이 시퀀스를 보고 미래 예측
         # (context_size+1, batch, encoding_size)로 변환
         obs_encoding = obs_encoding.reshape((self.context_size+1, -1, self.obs_encoding_size))
         obs_encoding = torch.transpose(obs_encoding, 0, 1)
@@ -122,9 +126,10 @@ class ViNT(BaseModel):
         # 관찰 인코딩 + 목표 인코딩 합치기 (시퀀스 형태로 연결)
         tokens = torch.cat((obs_encoding, goal_encoding), dim=1)
 
-        # Transformer 디코더로 최종 특징 생성
+        ## 5. Transformer 디코더 처리: 미래 경로 예측에 필요한 최종 특징 벡터 생성
         final_repr = self.decoder(tokens)
 
+        ## 6. 예측
         # 거리 예측 (scalar 값 1개)
         dist_pred = self.dist_predictor(final_repr)
 
