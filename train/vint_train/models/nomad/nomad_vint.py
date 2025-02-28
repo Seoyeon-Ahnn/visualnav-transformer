@@ -1,3 +1,8 @@
+"""
+과거 관찰 이미지와 목표 이미지를 함께 입력받아 효율적인 시계열 표현으로 변환해주는 인코더 네트워크
+"현재 상황을 목표와 비교했을 때, 어떤 상태인가?"를 하나의 벡터로 정리
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -74,7 +79,7 @@ class NoMaD_ViNT(nn.Module):
         # 평균 풀링 시 마스크 고려 (goal 포함/제외시 가중치 조정용)
         self.avg_pool_mask = torch.cat([1 - self.no_mask.float(), (1 - self.goal_mask.float()) * ((self.context_size + 2)/(self.context_size + 1))], dim=0)
 
-
+    ## 1. 입력 구성 및 처리
     def forward(self, obs_img: torch.tensor, goal_img: torch.tensor, input_goal_mask: torch.tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
 
         device = obs_img.device
@@ -86,7 +91,7 @@ class NoMaD_ViNT(nn.Module):
         if input_goal_mask is not None:
             goal_mask = input_goal_mask.to(device)
 
-        # 관찰 이미지의 마지막 프레임과 목표 이미지 결합 후 인코딩
+        # 관찰 이미지의 마지막 프레임과 목표 이미지 결합 후 인코딩, 시간 순서로 연결
         obsgoal_img = torch.cat([obs_img[:, 3*self.context_size:, :, :], goal_img], dim=1)
         obsgoal_encoding = self.goal_encoder.extract_features(obsgoal_img)
         obsgoal_encoding = self.goal_encoder._avg_pooling(obsgoal_encoding)
@@ -100,7 +105,8 @@ class NoMaD_ViNT(nn.Module):
             obsgoal_encoding = obsgoal_encoding.unsqueeze(1)
         assert obsgoal_encoding.shape[2] == self.goal_encoding_size
         goal_encoding = obsgoal_encoding
-        
+
+        ## 2. 각 프레임과 목표 이미지 인코딩 (EfficientNet 처리)
         # 과거 프레임 이미지들을 시간 순서대로 분리하고 다시 연결
         obs_img = torch.split(obs_img, 3, dim=1)
         obs_img = torch.concat(obs_img, dim=0)
@@ -123,21 +129,22 @@ class NoMaD_ViNT(nn.Module):
             src_key_padding_mask = torch.index_select(self.all_masks.to(device), 0, no_goal_mask)
         else:
             src_key_padding_mask = None
-        
+
+        ## 3. 포지셔널 인코딩 + Transformer 인코더 통과
         # 포지셔널 인코딩 적용
         if self.positional_encoding:
             obs_encoding = self.positional_encoding(obs_encoding)
 
         # Transformer 인코더 통과
         obs_encoding_tokens = self.sa_encoder(obs_encoding, src_key_padding_mask=src_key_padding_mask)
+
+        ## 4. 최종 출력: 평균 풀링으로 하나의 벡터로 압축
         if src_key_padding_mask is not None:
             avg_mask = torch.index_select(self.avg_pool_mask.to(device), 0, no_goal_mask).unsqueeze(-1)
             obs_encoding_tokens = obs_encoding_tokens * avg_mask
         obs_encoding_tokens = torch.mean(obs_encoding_tokens, dim=1)
 
         return obs_encoding_tokens
-
-
 
 # BatchNorm을 GroupNorm으로 교체하는 함수
 def replace_bn_with_gn(
