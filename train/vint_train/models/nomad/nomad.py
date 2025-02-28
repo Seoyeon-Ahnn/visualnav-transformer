@@ -16,7 +16,7 @@ class NoMaD(nn.Module):
 
         # 시각 인코더(vision_encoder), 노이즈 예측 네트워크(noise_pred_net), 거리 예측 네트워크(dist_pred_net) 설정
         self.vision_encoder = vision_encoder
-        self.noise_pred_net = noise_pred_net
+        self.noise_pred_net = noise_pred_net    # diffusion 쓰임
         self.dist_pred_net = dist_pred_net
     
     def forward(self, func_name, **kwargs):
