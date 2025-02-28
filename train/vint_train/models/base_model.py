@@ -1,3 +1,7 @@
+"""
+로봇이 이미지 기반으로 목표까지 가는 경로를 예측하는 뼈대 역할
+"""
+
 import torch
 import torch.nn as nn
 
@@ -50,6 +54,7 @@ class BaseModel(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         모델의 순전파 (Forward Pass) 함수
+        > 여기에 모델 구현해야 함
 
         Args:
             obs_img (torch.Tensor): 관측 이미지 (현재 로봇이 보는 이미지들)
