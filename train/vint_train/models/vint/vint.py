@@ -129,7 +129,7 @@ class ViNT(BaseModel):
         ## 5. Transformer 디코더 처리: 미래 경로 예측에 필요한 최종 특징 벡터 생성
         final_repr = self.decoder(tokens)
 
-        ## 6. 예측
+        ## 6. 미래 경로와 거리 예측
         # 거리 예측 (scalar 값 1개)
         dist_pred = self.dist_predictor(final_repr)
 
