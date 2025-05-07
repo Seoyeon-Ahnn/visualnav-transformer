@@ -1,7 +1,3 @@
-"""
-training script to train or fine-tune the ViNT model on your custom data
-"""
-
 import os
 import wandb
 import argparse
