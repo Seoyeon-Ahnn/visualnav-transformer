@@ -71,8 +71,8 @@ def _compute_losses(
     results = {
         "dist_loss": dist_loss,    # 거리 예측 결과와 실제 값의 MSE
         "action_loss": action_loss,    # 행동 예측 결과와 실제 값의 마스크된 MSE
-        "action_waypts_cos_sim": action_waypts_cos_similairity,    # 예측된 방향의 유사도 계산
-        "multi_action_waypts_cos_sim": multi_action_waypts_cos_sim,    # 방향 학습 여부에 따라 추가 유사도 측정
+        "action_waypts_cos_sim": action_waypts_cos_similairity,    # 예측된 방향의 유사도 계산 (모델이 점점 더 올바른 방향을 배우고 있는지 확인하는 용도)
+        "multi_action_waypts_cos_sim": multi_action_waypts_cos_sim,    # 방향 학습 여부에 따라 추가 유사도 측정 (모델이 점점 더 올바른 방향을 배우고 있는지 확인하는 용도)
     }
 
     if learn_angle:
@@ -132,10 +132,10 @@ def _log_data(
             if i % print_log_freq == 0 and print_log_freq != 0:
                 print(f"(epoch {epoch}) {logger.full_name()} {logger.average()}")
 
-    if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
+    if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:    # WandB 사용 여부에 따라 로그 기록
         wandb.log(data_log, commit=wandb_increment_step)
 
-    if image_log_freq != 0 and i % image_log_freq == 0:
+    if image_log_freq != 0 and i % image_log_freq == 0:    # 예측 결과 시각화
         visualize_dist_pred(
             to_numpy(obs_image),
             to_numpy(goal_image),
@@ -246,16 +246,19 @@ def train(
             action_mask,
         ) = data
 
+        # 1. 이미지 전처리 (관찰 obs, 목표 goal 이미지 변환)
         obs_images = torch.split(obs_image, 3, dim=1)
         viz_obs_image = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE)
         obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
         obs_image = torch.cat(obs_images, dim=1)
 
         viz_goal_image = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE)
-        
         goal_image = transform(goal_image).to(device)
+
+        # 2. 모델 순전파
         model_outputs = model(obs_image, goal_image)
 
+        # 3. 손실 계산 및 역전파
         dist_label = dist_label.to(device)
         action_label = action_label.to(device)
         action_mask = action_mask.to(device)
@@ -275,8 +278,9 @@ def train(
         )
 
         losses["total_loss"].backward()
-        optimizer.step()
+        optimizer.step()    # 파라미터 업데이트
 
+        # 4. 로그 출력 및 시각화
         for key, value in losses.items():
             if key in loggers:
                 logger = loggers[key]
@@ -326,6 +330,13 @@ def evaluate(
 ):
     """
     Evaluate the model on the given evaluation dataset.
+    ViNT 모델이 실제로 ‘얼마나 정확하게 행동을 예측하고 거리도 맞게 추정했는지’를 정량적으로 평가하고 시각화까지 해주는 함수
+    정확히 어떤 측면에서 잘했는지/못했는지를 수치와 시각으로 보여 줌
+
+    1. 거리(distance) 예측이 얼마나 정확한지 평가
+    2. 행동(action trajectory) 예측이 얼마나 실제 경로와 비슷한지 평가
+    3. 유사도(cosine similarity)를 통해 방향성이 얼마나 정확한지 평가
+    4. 시각화 및 wandb 기록을 통해 분석 가능하게 함
 
     Args:
         eval_type (string): f"{data_type}_{eval_type}" (e.g. "recon_train", "gs_test", etc.)
