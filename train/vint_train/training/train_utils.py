@@ -69,10 +69,10 @@ def _compute_losses(
     ))
 
     results = {
-        "dist_loss": dist_loss,
-        "action_loss": action_loss,
-        "action_waypts_cos_sim": action_waypts_cos_similairity,
-        "multi_action_waypts_cos_sim": multi_action_waypts_cos_sim,
+        "dist_loss": dist_loss,    # 거리 예측 결과와 실제 값의 MSE
+        "action_loss": action_loss,    # 행동 예측 결과와 실제 값의 마스크된 MSE
+        "action_waypts_cos_sim": action_waypts_cos_similairity,    # 예측된 방향의 유사도 계산
+        "multi_action_waypts_cos_sim": multi_action_waypts_cos_sim,    # 방향 학습 여부에 따라 추가 유사도 측정
     }
 
     if learn_angle:
@@ -88,7 +88,7 @@ def _compute_losses(
         results["action_orien_cos_sim"] = action_orien_cos_sim
         results["multi_action_orien_cos_sim"] = multi_action_orien_cos_sim
 
-    total_loss = alpha * 1e-2 * dist_loss + (1 - alpha) * action_loss
+    total_loss = alpha * 1e-2 * dist_loss + (1 - alpha) * action_loss    # alpha를 통해 거리 vs 행동 손실 가중치 조절
     results["total_loss"] = total_loss
 
     return results
