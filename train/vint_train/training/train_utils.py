@@ -472,7 +472,7 @@ def _compute_losses_nomad(
     pred_horizon = batch_action_label.shape[1]
     action_dim = batch_action_label.shape[2]
 
-    model_output_dict = model_output(
+    model_output_dict = model_output(    # diffusion 기반으로 행동을 생성
         ema_model,
         noise_scheduler,
         batch_obs_images,
@@ -486,8 +486,9 @@ def _compute_losses_nomad(
     gc_actions = model_output_dict['gc_actions']
     gc_distance = model_output_dict['gc_distance']
 
-    gc_dist_loss = F.mse_loss(gc_distance, batch_dist_label.unsqueeze(-1))
+    gc_dist_loss = F.mse_loss(gc_distance, batch_dist_label.unsqueeze(-1))    # 실제 정답 거리(batch_dist_label)와 모델이 예측한 거리(gc_distance)로 MSE loss 계산하여 정확도 평가
 
+    # 행동 예측 문제에서 학습할 가치가 있는 상황에 대해서만 계산하기 위해 마스크 적용: action_mask = 1이면 손실 계산에 포함
     def action_reduce(unreduced_loss: torch.Tensor):
         # Reduce over non-batch dimensions to get loss per batch element
         while unreduced_loss.dim() > 1:
@@ -499,9 +500,11 @@ def _compute_losses_nomad(
     assert uc_actions.shape == batch_action_label.shape, f"{uc_actions.shape} != {batch_action_label.shape}"
     assert gc_actions.shape == batch_action_label.shape, f"{gc_actions.shape} != {batch_action_label.shape}"
 
+    # 두 방식에 대해 MSE 계산하고 마스크 적용
     uc_action_loss = action_reduce(F.mse_loss(uc_actions, batch_action_label, reduction="none"))
     gc_action_loss = action_reduce(F.mse_loss(gc_actions, batch_action_label, reduction="none"))
 
+    # 방향 유사도 계산 (1에 가까울수록 방향이 정확함)
     uc_action_waypts_cos_similairity = action_reduce(F.cosine_similarity(
         uc_actions[:, :, :2], batch_action_label[:, :, :2], dim=-1
     ))
@@ -609,7 +612,8 @@ def train_nomad(
                 dataset_idx,
                 action_mask, 
             ) = data
-            
+
+            # 1. 데이터 전처리 및 조건 인코딩
             obs_images = torch.split(obs_image, 3, dim=1)
             batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
             batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
@@ -632,6 +636,7 @@ def train_nomad(
             naction = from_numpy(ndeltas).to(device)
             assert naction.shape[-1] == 2, "action dim must be 2"
 
+            # 2. 거리 예측 및 손실 계산
             # Predict distance
             dist_pred = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
             dist_loss = nn.functional.mse_loss(dist_pred.squeeze(-1), distance)
@@ -646,6 +651,7 @@ def train_nomad(
                 (B,), device=device
             ).long()
 
+            # 3. 행동 예측을 위한 diffusion 노이즈 학습
             # Add noise to the clean images according to the noise magnitude at each diffusion iteration
             noisy_action = noise_scheduler.add_noise(
                 naction, noise, timesteps)
@@ -660,12 +666,14 @@ def train_nomad(
                 assert unreduced_loss.shape == action_mask.shape, f"{unreduced_loss.shape} != {action_mask.shape}"
                 return (unreduced_loss * action_mask).mean() / (action_mask.mean() + 1e-2)
 
+            # 4. diffusion 손실 계산 및 전체 손실 합산
             # L2 loss
             diffusion_loss = action_reduce(F.mse_loss(noise_pred, noise, reduction="none"))
             
-            # Total loss
+            # Total loss: alpha가 작으면 행동 예측에 집중, 크면 거리 예측에 집중
             loss = alpha * dist_loss + (1-alpha) * diffusion_loss
 
+            # 5. 역전파 및 모델 업데이트
             # Optimize
             optimizer.zero_grad()
             loss.backward()
@@ -748,6 +756,7 @@ def evaluate_nomad(
 ):
     """
     Evaluate the model on the given evaluation dataset.
+    NoMaD 모델이 훈련되지 않은 새로운 데이터셋에서 얼마나 잘 예측하는지를 평가
 
     Args:
         eval_type (string): f"{data_type}_{eval_type}" (e.g. "recon_train", "gs_test", etc.)
@@ -814,7 +823,8 @@ def evaluate_nomad(
                 dataset_idx,
                 action_mask,
             ) = data
-            
+
+            # 1. 데이터 로드 및 전처리
             obs_images = torch.split(obs_image, 3, dim=1)
             batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
             batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
@@ -825,6 +835,7 @@ def evaluate_nomad(
 
             B = actions.shape[0]
 
+            # 2. 조건 마스크 종류별 diffusion 예측 & 손실 측정
             # Generate random goal mask
             rand_goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
             goal_mask = torch.ones_like(rand_goal_mask).long().to(device)
@@ -853,6 +864,7 @@ def evaluate_nomad(
                 (B,), device=device
             ).long()
 
+            # 3. diffusion noise 복원 손실 계산: 작을수록 더 정확한 예측
             noisy_actions = noise_scheduler.add_noise(
                 naction, noise, timesteps)
 
@@ -959,6 +971,7 @@ def get_delta(actions):
     delta = ex_actions[:,1:] - ex_actions[:,:-1]
     return delta
 
+# diffusion 결과를 실제 행동 trajectory로 복원하는 함수
 def get_action(diffusion_output, action_stats=ACTION_STATS):
     # diffusion_output: (B, 2*T+1, 1)
     # return: (B, T-1)
@@ -970,7 +983,7 @@ def get_action(diffusion_output, action_stats=ACTION_STATS):
     actions = np.cumsum(ndeltas, axis=1)
     return from_numpy(actions).to(device)
 
-
+# diffusion 과정으로 행동 trajectory를 샘플링하는 메인 함수
 def model_output(
     model: nn.Module,
     noise_scheduler: DDPMScheduler,
